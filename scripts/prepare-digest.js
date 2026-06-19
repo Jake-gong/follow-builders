@@ -23,8 +23,8 @@ import { homedir } from 'os';
 
 // -- Constants ---------------------------------------------------------------
 
-const USER_DIR = join(homedir(), '.follow-builders');
-const CONFIG_PATH = join(USER_DIR, 'config.json');
+const FB_HOME = process.env.FB_HOME || join(homedir(), '.follow-builders');
+const CONFIG_PATH = join(FB_HOME, 'config.json');
 
 const FEED_X_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json';
 const FEED_PODCASTS_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json';
@@ -107,7 +107,7 @@ async function main() {
   const prompts = {};
   const scriptDir = decodeURIComponent(new URL('.', import.meta.url).pathname);
   const localPromptsDir = join(scriptDir, '..', 'prompts');
-  const userPromptsDir = join(USER_DIR, 'prompts');
+  const userPromptsDir = join(FB_HOME, 'prompts');
 
   for (const filename of PROMPT_FILES) {
     const key = filename.replace('.md', '').replace(/-/g, '_');

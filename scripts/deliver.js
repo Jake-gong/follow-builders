@@ -4,7 +4,7 @@
 // Follow Builders — Delivery Script
 // ============================================================================
 // Sends a digest to the user via their chosen delivery method.
-// Supports: Telegram bot, Email (via Resend), or stdout (default).
+// Supports: Feishu (Open API), Telegram bot, Email (via Resend), or stdout.
 //
 // Usage:
 //   echo "digest text" | node deliver.js
@@ -15,6 +15,7 @@
 // and API keys from ~/.follow-builders/.env
 //
 // Delivery methods:
+//   - "feishu": sends via Feishu Open API (needs FEISHU_APP_ID + FEISHU_APP_SECRET + delivery.chatId)
 //   - "telegram": sends via Telegram Bot API (needs TELEGRAM_BOT_TOKEN + chat ID)
 //   - "email": sends via Resend API (needs RESEND_API_KEY + email address)
 //   - "stdout" (default): just prints to terminal
@@ -28,9 +29,9 @@ import { config as loadEnv } from 'dotenv';
 
 // -- Constants ---------------------------------------------------------------
 
-const USER_DIR = join(homedir(), '.follow-builders');
-const CONFIG_PATH = join(USER_DIR, 'config.json');
-const ENV_PATH = join(USER_DIR, '.env');
+const FB_HOME = process.env.FB_HOME || join(homedir(), '.follow-builders');
+const CONFIG_PATH = join(FB_HOME, 'config.json');
+const ENV_PATH = join(FB_HOME, '.env');
 
 // -- Read input --------------------------------------------------------------
 
@@ -149,6 +150,83 @@ async function sendEmail(text, apiKey, toEmail) {
   }
 }
 
+// -- Feishu Delivery (Open API) -----------------------------------------------
+
+// Token cache — reuse the tenant_access_token until it expires (2 hours)
+let _feishuToken = null;
+let _feishuTokenExpiry = 0;
+
+async function getFeishuToken(appId, appSecret) {
+  if (_feishuToken && Date.now() < _feishuTokenExpiry) {
+    return _feishuToken;
+  }
+  const res = await fetch(
+    'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: appId, app_secret: appSecret })
+    }
+  );
+  const data = await res.json();
+  if (data.code !== 0) {
+    throw new Error(`Feishu auth error (${data.code}): ${data.msg}`);
+  }
+  _feishuToken = data.tenant_access_token;
+  _feishuTokenExpiry = Date.now() + (data.expire - 60) * 1000; // 60s buffer
+  return _feishuToken;
+}
+
+// Sends a text message to a Feishu group via the Open API.
+// Uses the app's ability to send messages to group chats it's in.
+// Maximum message content is ~30,000 characters in Feishu; we split conservatively.
+async function sendFeishu(text, appId, appSecret, chatId) {
+  const token = await getFeishuToken(appId, appSecret);
+
+  const MAX_LEN = 15000;
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    if (remaining.length <= MAX_LEN) {
+      chunks.push(remaining);
+      break;
+    }
+    let splitAt = remaining.lastIndexOf('\n', MAX_LEN);
+    if (splitAt < MAX_LEN * 0.5) splitAt = MAX_LEN;
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt);
+  }
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const suffix = chunks.length > 1
+      ? `\n\n--- (${i + 1}/${chunks.length}) ---`
+      : '';
+
+    const res = await fetch(
+      'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          receive_id: chatId,
+          msg_type: 'text',
+          content: JSON.stringify({ text: chunk + suffix })
+        })
+      }
+    );
+    const data = await res.json();
+    if (data.code !== 0) {
+      throw new Error(`Feishu send error (${data.code}): ${data.msg}`);
+    }
+
+    if (chunks.length > 1) await new Promise(r => setTimeout(r, 500));
+  }
+}
+
 // -- Main --------------------------------------------------------------------
 
 async function main() {
@@ -170,6 +248,22 @@ async function main() {
 
   try {
     switch (delivery.method) {
+      case 'feishu': {
+        const appId = process.env.FEISHU_APP_ID;
+        const appSecret = process.env.FEISHU_APP_SECRET;
+        const chatId = delivery.chatId;
+        if (!appId) throw new Error('FEISHU_APP_ID not found in .env');
+        if (!appSecret) throw new Error('FEISHU_APP_SECRET not found in .env');
+        if (!chatId) throw new Error('delivery.chatId not found in config.json');
+        await sendFeishu(digestText, appId, appSecret, chatId);
+        console.log(JSON.stringify({
+          status: 'ok',
+          method: 'feishu',
+          message: `Digest sent to Feishu group ${chatId}`
+        }));
+        break;
+      }
+
       case 'telegram': {
         const botToken = process.env.TELEGRAM_BOT_TOKEN;
         const chatId = delivery.chatId;
